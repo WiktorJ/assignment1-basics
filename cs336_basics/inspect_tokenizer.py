@@ -16,28 +16,34 @@ def _hex_to_readable(hex_str: str) -> str:
         return repr(raw)
 
 
-def inspect_vocab(path: str) -> None:
+def inspect_vocab(path: str, output_path: str, max_rows: int | None = None) -> None:
     with open(path, "r", encoding="utf-8") as f:
         vocab = json.load(f)
-    print(f"=== Vocabulary ({len(vocab)} tokens) ===")
-    # Sort by token id
-    for hex_token, idx in sorted(vocab.items(), key=lambda x: x[1]):
-        readable = _hex_to_readable(hex_token)
-        print(f"  {idx:>6d}  {readable}")
+    sorted_items = sorted(vocab.items(), key=lambda x: x[1])
+    if max_rows is not None:
+        sorted_items = sorted_items[:max_rows]
+    with open(output_path, "w", encoding="utf-8") as out:
+        out.write(f"=== Vocabulary ({len(vocab)} tokens) ===\n")
+        for hex_token, idx in sorted_items:
+            readable = _hex_to_readable(hex_token)
+            out.write(f"  {idx:>6d}  {readable}\n")
 
 
-def inspect_merges(path: str) -> None:
+def inspect_merges(path: str, output_path: str, max_rows: int | None = None) -> None:
     with open(path, "r", encoding="utf-8") as f:
         lines = f.read().splitlines()
-    print(f"=== Merges ({len(lines)} rules) ===")
-    for i, line in enumerate(lines):
-        parts = line.strip().split(" ")
-        if len(parts) != 2:
-            continue
-        a_readable = _hex_to_readable(parts[0])
-        b_readable = _hex_to_readable(parts[1])
-        merged = _hex_to_readable(parts[0] + parts[1])
-        print(f"  {i:>6d}  {a_readable!r} + {b_readable!r} -> {merged!r}")
+    with open(output_path, "w", encoding="utf-8") as out:
+        out.write(f"=== Merges ({len(lines)} rules) ===\n")
+        for i, line in enumerate(lines):
+            if max_rows is not None and i >= max_rows:
+                break
+            parts = line.strip().split(" ")
+            if len(parts) != 2:
+                continue
+            a_readable = _hex_to_readable(parts[0])
+            b_readable = _hex_to_readable(parts[1])
+            merged = _hex_to_readable(parts[0] + parts[1])
+            out.write(f"  {i:>6d}  {a_readable!r} + {b_readable!r} -> {merged!r}\n")
 
 
 def main():
@@ -56,6 +62,24 @@ def main():
         default=None,
         help="Path to the merges text file.",
     )
+    parser.add_argument(
+        "--output-vocab-path",
+        type=str,
+        default="vocab_readable.txt",
+        help="Path to write the human-readable vocabulary (default: vocab_readable.txt).",
+    )
+    parser.add_argument(
+        "--output-merges-path",
+        type=str,
+        default="merges_readable.txt",
+        help="Path to write the human-readable merges (default: merges_readable.txt).",
+    )
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Maximum number of rows to write (default: all).",
+    )
 
     args = parser.parse_args()
 
@@ -63,13 +87,10 @@ def main():
         parser.error("Provide at least one of --vocab-path or --merges-path.")
 
     if args.vocab_path is not None:
-        inspect_vocab(args.vocab_path)
-
-    if args.vocab_path is not None and args.merges_path is not None:
-        print()
+        inspect_vocab(args.vocab_path, args.output_vocab_path, args.max_rows)
 
     if args.merges_path is not None:
-        inspect_merges(args.merges_path)
+        inspect_merges(args.merges_path, args.output_merges_path, args.max_rows)
 
 
 if __name__ == "__main__":
