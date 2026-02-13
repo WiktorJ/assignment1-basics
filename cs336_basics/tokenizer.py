@@ -3,6 +3,7 @@ import os
 import regex as re
 from collections import Counter, defaultdict
 from sortedcontainers import SortedList
+import multiprocessing as mp
 
 
 def find_chunk_boundaries(
@@ -52,12 +53,20 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-def _pretokenize(
+def _pretokenize_block(
     text: str, pretokenize_regex: str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 ) -> Counter[tuple[bytes, ...]]:
     return Counter(
         tuple(bytes([c]) for c in match.group().encode("UTF-8")) for match in re.finditer(pretokenize_regex, text)
     )
+
+
+def _pretokenize_chunk(special_tokens_pattern: str, text_chunk: str):
+    pretokens = Counter()
+    for block in re.split(special_tokens_pattern, text_chunk):
+        if block.strip():
+            pretokens += _pretokenize_block(block)
+    return pretokens
 
 
 def merge_subsequences(original, target):
@@ -83,69 +92,72 @@ def train_bpe(
     vocab_size: int,
     special_tokens: list[str],
     split_special_token: str = "<|endoftext|>",
-    num_workers: int = 1,
+    num_workers: int = 2,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    special_tokens_pattern = "|".join(re.escape(token) for token in special_tokens)
+    pool = mp.Pool(num_workers)
+    chunk_pretokens = []
     with open(input_path, "rb") as f:
         chunk_boundaries = find_chunk_boundaries(f, num_workers, split_special_token.encode("utf-8"))
-        vocab = {}
-        for t in special_tokens:
-            vocab[len(vocab)] = t.encode("utf-8")
-        for t in range(256):
-            vocab[len(vocab)] = bytes([t])
-        merges = []
-        special_tokens_pattern = "|".join(re.escape(token) for token in special_tokens)
-
-        # TODO: Parallelize
         for start, end in zip(chunk_boundaries[:-1], chunk_boundaries[1:]):
             f.seek(start)
             text_chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            pretokens = Counter()
-            for chunk in re.split(special_tokens_pattern, text_chunk):
-                if chunk:
-                    pretokens += _pretokenize(chunk)
-            pairs = Counter()
-            pretokens_by_pair = defaultdict(set)
-            for token, count in pretokens.items():
-                for pair in zip(token[:-1], token[1:]):
-                    pairs[pair] += count
-                    pretokens_by_pair[pair].add(token)
+            chunk_pretokens.append(pool.apply_async(_pretokenize_chunk, (special_tokens_pattern, text_chunk)))
 
-            pair_sl = SortedList(((count, pair) for pair, count in pairs.items()))
+    pool.close()
+    pool.join()
+    pretokens = sum((chunk.get() for chunk in chunk_pretokens), Counter())
 
-            while len(vocab) < vocab_size:
-                found_next_pair = False
-                # Find pair with highest frequency, filter pairs that have changed
+    vocab = {}
+    for t in special_tokens:
+        vocab[len(vocab)] = t.encode("utf-8")
+    for t in range(256):
+        vocab[len(vocab)] = bytes([t])
+    merges = []
+
+    pairs = Counter()
+    pretokens_by_pair = defaultdict(set)
+    for token, count in pretokens.items():
+        for pair in zip(token[:-1], token[1:]):
+            pairs[pair] += count
+            pretokens_by_pair[pair].add(token)
+
+    pair_sl = SortedList(((count, pair) for pair, count in pairs.items()))
+
+    while len(vocab) < vocab_size:
+        found_next_pair = False
+        # Find pair with highest frequency, filter pairs that have changed
+        top_count, top_pair = pair_sl.pop(-1)
+        while not found_next_pair:
+            if top_pair not in pairs:
                 top_count, top_pair = pair_sl.pop(-1)
-                while not found_next_pair:
-                    if top_pair not in pairs:
-                        top_count, top_pair = pair_sl.pop(-1)
-                        continue
-                    if pairs[top_pair] != top_count:
-                        pair_sl.add((pairs[top_pair], top_pair))
-                        top_count, top_pair = pair_sl.pop(-1)
-                        continue
-                    found_next_pair = True
+                continue
+            if pairs[top_pair] != top_count:
+                pair_sl.add((pairs[top_pair], top_pair))
+                top_count, top_pair = pair_sl.pop(-1)
+                continue
+            found_next_pair = True
 
-                merges.append(top_pair)
-                vocab[len(vocab)] = b"".join(top_pair)
+        merges.append(top_pair)
+        vocab[len(vocab)] = b"".join(top_pair)
 
-                new_pairs = set()
-                for pretoken in pretokens_by_pair[top_pair].copy():
-                    pretoken_count = pretokens[pretoken]
-                    new_pretoken = merge_subsequences(pretoken, top_pair)
-                    old_pairs = list(zip(pretoken[:-1], pretoken[1:]))
-                    current_pairs = list(zip(new_pretoken[:-1], new_pretoken[1:]))
-                    for pair in old_pairs:
-                        pairs[pair] -= pretoken_count
-                        pretokens_by_pair[pair].discard(pretoken)
-                    for pair in current_pairs:
-                        pairs[pair] += pretoken_count
-                        new_pairs.add(pair)
-                        pretokens_by_pair[pair].add(new_pretoken)
-                    pretokens[new_pretoken] += pretoken_count
-                    del pretokens[pretoken]
-                del pairs[top_pair]
-                for new_pair in new_pairs:
-                    pair_sl.add((pairs[new_pair], new_pair))
+        new_pairs = set()
+        for pretoken in pretokens_by_pair[top_pair].copy():
+            pretoken_count = pretokens[pretoken]
+            new_pretoken = merge_subsequences(pretoken, top_pair)
+            old_pairs = list(zip(pretoken[:-1], pretoken[1:]))
+            current_pairs = list(zip(new_pretoken[:-1], new_pretoken[1:]))
+            for pair in old_pairs:
+                pairs[pair] -= pretoken_count
+                pretokens_by_pair[pair].discard(pretoken)
+            for pair in current_pairs:
+                pairs[pair] += pretoken_count
+                new_pairs.add(pair)
+                pretokens_by_pair[pair].add(new_pretoken)
+            pretokens[new_pretoken] += pretoken_count
+            del pretokens[pretoken]
+        del pairs[top_pair]
+        for new_pair in new_pairs:
+            pair_sl.add((pairs[new_pair], new_pair))
 
-        return vocab, merges
+    return vocab, merges
