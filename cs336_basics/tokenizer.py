@@ -1,4 +1,5 @@
 from typing import BinaryIO
+import json
 import os
 import regex as re
 from collections import Counter, defaultdict
@@ -88,10 +89,10 @@ def merge_subsequences(original, target):
 
 
 def _save_vocab(vocab: dict[int, bytes], path: str | os.PathLike):
+    serializable = {str(idx): vocab[idx].hex() for idx in sorted(vocab.keys())}
     with open(path, "w", encoding="utf-8") as f:
-        for idx in sorted(vocab.keys()):
-            token_hex = vocab[idx].hex()
-            f.write(f"{idx}\t{token_hex}\n")
+        json.dump(serializable, f, indent=2)
+        f.write("\n")
 
 
 def _save_merges(merges: list[tuple[bytes, bytes]], path: str | os.PathLike):

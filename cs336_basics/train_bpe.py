@@ -41,7 +41,7 @@ def main():
         "--save-vocab-path",
         type=str,
         default=None,
-        help="Path to save the vocabulary to a text file.",
+        help="Path to save the vocabulary to a JSON file.",
     )
     parser.add_argument(
         "--save-merges-path",
