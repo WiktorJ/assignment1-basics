@@ -87,12 +87,27 @@ def merge_subsequences(original, target):
     return tuple(result)
 
 
+def _save_vocab(vocab: dict[int, bytes], path: str | os.PathLike):
+    with open(path, "w", encoding="utf-8") as f:
+        for idx in sorted(vocab.keys()):
+            token_hex = vocab[idx].hex()
+            f.write(f"{idx}\t{token_hex}\n")
+
+
+def _save_merges(merges: list[tuple[bytes, bytes]], path: str | os.PathLike):
+    with open(path, "w", encoding="utf-8") as f:
+        for a, b in merges:
+            f.write(f"{a.hex()} {b.hex()}\n")
+
+
 def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
     split_special_token: str = "<|endoftext|>",
     num_workers: int = 2,
+    save_vocab_path: str | os.PathLike | None = None,
+    save_merges_path: str | os.PathLike | None = None,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     special_tokens_pattern = "|".join(re.escape(token) for token in special_tokens)
     pool = mp.Pool(num_workers)
@@ -159,5 +174,10 @@ def train_bpe(
         del pairs[top_pair]
         for new_pair in new_pairs:
             pair_sl.add((pairs[new_pair], new_pair))
+
+    if save_vocab_path is not None:
+        _save_vocab(vocab, save_vocab_path)
+    if save_merges_path is not None:
+        _save_merges(merges, save_merges_path)
 
     return vocab, merges
