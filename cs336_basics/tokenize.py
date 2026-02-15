@@ -31,8 +31,8 @@ def main():
         "--special-tokens",
         type=str,
         nargs="*",
-        default=None,
-        help="List of special tokens (e.g. '<|endoftext|>').",
+        default=["<|endoftext|>"],
+        help="List of special tokens (default: '<|endoftext|>').",
     )
     parser.add_argument(
         "--mode",
