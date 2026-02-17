@@ -1,4 +1,4 @@
-from typing import BinaryIO
+from typing import BinaryIO, Iterable, Iterator
 import json
 import os
 import regex as re
@@ -56,17 +56,15 @@ def find_chunk_boundaries(
 
 def _pretokenize_block(
     text: str, pretokenize_regex: str = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-) -> Counter[tuple[bytes, ...]]:
-    return Counter(
-        tuple(bytes([c]) for c in match.group().encode("UTF-8")) for match in re.finditer(pretokenize_regex, text)
-    )
+) -> list[tuple[bytes, ...]]:
+    return [tuple(bytes([c]) for c in match.group().encode("UTF-8")) for match in re.finditer(pretokenize_regex, text)]
 
 
-def _pretokenize_chunk(special_tokens_pattern: str, text_chunk: str):
+def _pretokenize_chunk(special_tokens_pattern: str, text_chunk: str) -> Counter[tuple[bytes, ...]]:
     pretokens = Counter()
     for block in re.split(special_tokens_pattern, text_chunk):
         if block.strip():
-            pretokens += _pretokenize_block(block)
+            pretokens += Counter(_pretokenize_block(block))
     return pretokens
 
 
@@ -89,7 +87,7 @@ def merge_subsequences(original, target):
 
 
 def _save_vocab(vocab: dict[int, bytes], path: str | os.PathLike):
-    serializable = {str(idx): vocab[idx].hex() for idx in sorted(vocab.keys())}
+    serializable = {vocab[idx].hex(): idx for idx in sorted(vocab.keys())}
     with open(path, "w", encoding="utf-8") as f:
         json.dump(serializable, f, indent=2)
         f.write("\n")
@@ -182,3 +180,114 @@ def train_bpe(
         _save_merges(merges, save_merges_path)
 
     return vocab, merges
+
+
+class Tokenizer:
+    def __init__(
+        self, vocab: dict[int, bytes], merges: list[tuple[bytes, bytes]], special_tokens: list[str] | None = None
+    ):
+        """
+        Initialize a BPE tokenizer.
+        Args:
+            vocab (dict[int, bytes]): The vocabulary mapping from token IDs to token bytes.
+            merges (list[tuple[bytes, bytes]]): The BPE merges, where each tuple represents a merge operation.
+            special_tokens (list[str], optional): A list of special tokens to be added to the tokenizer vocabulary.
+                These strings will never be split into multiple tokens, and will always be
+                kept as a single token.
+        """
+        self.vocab = vocab
+        self.vocab_inv = {v: k for k, v in vocab.items()}
+        self.merges = merges
+        self.merges_dict = {merge: i for i, merge in enumerate(merges)}
+        self.pretoken_cache = defaultdict(list)
+        if special_tokens:
+            self.special_tokens = sorted(special_tokens or [], key=len, reverse=True)
+            self.special_tokens_pattern = re.compile(
+                "(" + "|".join(re.escape(token) for token in self.special_tokens) + ")"
+            )
+            next_id = max(vocab.keys()) + 1
+            for token in self.special_tokens:
+                token = token.encode("utf-8")
+                if token not in self.vocab_inv:
+                    self.vocab[next_id] = token
+                    self.vocab_inv[token] = next_id
+                    next_id += 1
+        else:
+            self.special_tokens = None
+            self.special_tokens_pattern = None
+
+    @classmethod
+    def from_files(cls, vocab_path: str, merges_path: str, special_tokens: list[str] | None = None):
+        with open(vocab_path, "r", encoding="utf-8") as f:
+            vocab = json.load(f)
+            vocab = {int(token_id): bytes.fromhex(token_bytes) for token_bytes, token_id in vocab.items()}
+
+        with open(merges_path, "r", encoding="utf-8") as f:
+            merges = [tuple(line.strip().split(" ")) for line in f]
+            merges = [(bytes.fromhex(merge[0]), bytes.fromhex(merge[1])) for merge in merges]
+        return cls(vocab, merges, special_tokens=special_tokens)
+
+    def encode(self, text: str) -> list[int]:
+        """
+        Encode a string into a list of token IDs.
+        Args:
+            text (str): The input text to encode.
+        Returns:
+            list[int]: A list of token IDs representing the input text.
+        """
+        if not self.special_tokens_pattern:
+            return self._encode_block(text)
+
+        tokens = []
+        for block in re.split(self.special_tokens_pattern, text):
+            if block in self.special_tokens:
+                tokens.append(self.vocab_inv[block.encode("utf-8")])
+            else:
+                tokens.extend(self._encode_block(block))
+        return tokens
+
+    def _encode_block(self, block: str) -> list[int]:
+        """
+        Encode a string into a list of token IDs.
+        Args:
+            text (str): The input text to encode.
+        Returns:
+            list[int]: A list of token IDs representing the input text.
+        """
+        tokens = []
+        for pretoken in _pretokenize_block(block):
+            if pretoken in self.pretoken_cache:
+                tokens.extend(self.pretoken_cache[pretoken])
+                continue
+            while True:
+                earliest_merge_index = len(self.merges)
+                earliest_pretoken = None
+                for p in zip(pretoken[:-1], pretoken[1:]):
+                    if p in self.merges_dict and self.merges_dict[p] < earliest_merge_index:
+                        earliest_merge_index = self.merges_dict[p]
+                        earliest_pretoken = p
+                if earliest_pretoken:
+                    pretoken = merge_subsequences(pretoken, earliest_pretoken)
+                else:
+                    break
+            for token in pretoken:
+                if token in self.vocab_inv:
+                    tokens.append(self.vocab_inv[token])
+                    self.pretoken_cache[pretoken].append(self.vocab_inv[token])
+                else:
+                    raise ValueError(f"Token {token} not in vocabulary")
+        return tokens
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for element in iterable:
+            yield from self.encode(element)
+
+    def decode(self, tokens: list[int]) -> str:
+        """
+        Decode a list of token IDs into a string.
+        Args:
+            tokens (list[int]): A list of token IDs to decode.
+        Returns:
+            str: The decoded string.
+        """
+        return b"".join([self.vocab[token] for token in tokens]).decode("utf-8", errors="replace")

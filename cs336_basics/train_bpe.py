@@ -6,16 +6,14 @@ from cs336_basics.tokenizer import train_bpe
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Train a BPE tokenizer on a text file."
-    )
+    parser = argparse.ArgumentParser(description="Train a BPE tokenizer on a text file.")
     parser.add_argument(
-        "input_path",
+        "--input_path",
         type=str,
         help="Path to the input text file.",
     )
     parser.add_argument(
-        "vocab_size",
+        "--vocab_size",
         type=int,
         help="Desired vocabulary size.",
     )
