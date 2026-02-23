@@ -7,6 +7,19 @@ def silu(x):
     return x * torch.sigmoid(x)
 
 
+def softmax(x, dim):
+    x = x - torch.max(x, dim=dim, keepdim=True)[0]
+    return torch.exp(x) / torch.sum(torch.exp(x), dim=dim, keepdim=True)
+
+
+def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, mask: torch.Tensor | None):
+    dk = K.shape[-1]
+    qk = einx.dot("... q d_k, ... k d_k -> ... q k", Q, K) / np.sqrt(dk)
+    if mask is not None:
+        qk[~mask] = -torch.inf
+    return einx.dot("... q k, ... k d_v -> ... q d_v", softmax(qk, dim=-1), V)
+
+
 class Linear(torch.nn.Module):
     def __init__(self, in_features, out_features, device=None, dtype=None):
         super().__init__()
@@ -51,13 +64,38 @@ class RMSNorm(torch.nn.Module):
 class SwiGLU(torch.nn.Module):
     def __init__(self, d_model, d_ff, device=None, dtype=None):
         super().__init__()
-        self.d_model = d_model
-        self.d_ff = d_ff
-        self.device = device
-        self.dtype = dtype
         self.W1 = Linear(d_model, d_ff, device=device, dtype=dtype)
         self.W2 = Linear(d_ff, d_model, device=device, dtype=dtype)
         self.W3 = Linear(d_model, d_ff, device=device, dtype=dtype)
 
     def forward(self, x):
         return self.W2(silu(self.W1(x)) * self.W3(x))
+
+
+class RoPE(torch.nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None, dtype=None):
+        super().__init__()
+        base = 1.0 / theta ** (torch.arange(0, d_k, 2) / d_k).to(device, dtype=dtype)
+        seq_lens = torch.arange(max_seq_len, device=device, dtype=dtype)
+        angles = einx.multiply("s, d_2 -> s d_2", seq_lens, base)
+        angles = einx.rearrange("s d_2 -> s (d_2 2)", angles)
+        self.register_buffer("cos", angles.cos().to(device), persistent=False)
+        self.register_buffer("sin", angles.sin().to(device), persistent=False)
+        self.R = torch.tensor([[0.0, -1.0], [1.0, 0.0]], dtype=dtype).to(device)
+
+    def forward(self, x: torch.Tensor, token_position: torch.Tensor):
+        # dim(x) = [..., seq_len, d_k]
+        # dim(token_position) = [..., seq_len]
+        # Naive operation:
+        # R*q (dxd * dx1) = x (dx1) = [cos*x1 + -sin*x2, sin*x1 + cos*x2, ...]
+
+        cos = self.cos[token_position, :]
+        sin = self.sin[token_position, :]
+
+        # [-x2, x1, -x4, x3, ...]
+        x_flipped = einx.dot("... (d_2 r_in), r_out r_in -> ... (d_2 r_out)", x, self.R)
+        # [cos*x1, cos*x2, cos*x3, cos*x4, ...]
+        x_cos = einx.multiply("... s d, s d -> ... s d", x, cos)
+        # [-sin*x2, sin*x1, -sin*x4, sin*x3, ...]
+        x_sin = einx.multiply("... s d, s d -> ... s d", x_flipped, sin)
+        return x_cos + x_sin
