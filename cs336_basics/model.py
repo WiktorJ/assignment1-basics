@@ -16,7 +16,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     dk = K.shape[-1]
     qk = einx.dot("... q d_k, ... k d_k -> ... q k", Q, K) / np.sqrt(dk)
     if mask is not None:
-        qk[~mask] = -torch.inf
+        qk.masked_fill_(~mask, -torch.inf)
     return einx.dot("... q k, ... k d_v -> ... q d_v", softmax(qk, dim=-1), V)
 
 
@@ -78,6 +78,7 @@ class RoPE(torch.nn.Module):
         base = 1.0 / theta ** (torch.arange(0, d_k, 2) / d_k).to(device, dtype=dtype)
         seq_lens = torch.arange(max_seq_len, device=device, dtype=dtype)
         angles = einx.multiply("s, d_2 -> s d_2", seq_lens, base)
+        # [x1, x2, ...] -> [x1, x1, x2, x2, ...]
         angles = einx.rearrange("s d_2 -> s (d_2 2)", angles)
         self.register_buffer("cos", angles.cos().to(device), persistent=False)
         self.register_buffer("sin", angles.sin().to(device), persistent=False)
@@ -89,13 +90,34 @@ class RoPE(torch.nn.Module):
         # Naive operation:
         # R*q (dxd * dx1) = x (dx1) = [cos*x1 + -sin*x2, sin*x1 + cos*x2, ...]
 
-        cos = self.cos[token_position, :]
-        sin = self.sin[token_position, :]
+        cos = self.cos[token_position]
+        sin = self.sin[token_position]
 
         # [-x2, x1, -x4, x3, ...]
         x_flipped = einx.dot("... (d_2 r_in), r_out r_in -> ... (d_2 r_out)", x, self.R)
-        # [cos*x1, cos*x2, cos*x3, cos*x4, ...]
-        x_cos = einx.multiply("... s d, s d -> ... s d", x, cos)
-        # [-sin*x2, sin*x1, -sin*x4, sin*x3, ...]
-        x_sin = einx.multiply("... s d, s d -> ... s d", x_flipped, sin)
-        return x_cos + x_sin
+        # [cos*x1, cos*x2, cos*x3, cos*x4, ...] + [-sin*x2, sin*x1, -sin*x4, sin*x3, ...]
+        return x * cos + x_flipped * sin
+
+
+class MultiheadSelfAttention(torch.nn.Module):
+    def __init__(self, d_model, n_heads):
+        super().__init__()
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.d_k = d_model // n_heads
+        self.d_v = d_model // n_heads
+        self.W = Linear(d_model, 3 * d_model, device=None, dtype=None)
+        self.Wo = Linear(d_model, d_model, device=None, dtype=None)
+
+    def forward(self, x: torch.Tensor, rope: RoPE | None = None, token_position: torch.Tensor | None = None):
+        # dim(x) = [..., seq_len, d_model]
+        # QKV = einx.rearrange("... s (n dm qkv) -> ... n s dm qkv", self.W(x), qkv=self.d_model, n=self.n_heads)
+        seq_len = x.shape[-2]
+        Q, K, V = einx.rearrange("... s (qkv n dh) -> qkv ... n s dh", self.W(x), n=self.n_heads, dh=self.d_k)
+        if rope is not None:
+            Q = rope(Q, token_position)
+            K = rope(K, token_position)
+        mask = ~torch.triu(torch.ones((seq_len, seq_len), device=Q.device, dtype=Q.dtype), diagonal=1).bool()
+        att = scaled_dot_product_attention(Q, K, V, mask)
+        att = einx.rearrange("... n s dv -> ... s (n dv)", att, n=self.n_heads)
+        return self.Wo(att)
