@@ -8,7 +8,7 @@ import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
 from torch import Tensor, embedding, rms_norm
-from cs336_basics import tokenizer, model
+from cs336_basics import tokenizer, model, training
 
 
 def run_linear(
@@ -287,7 +287,28 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    rope = model.RoPE(theta, d_model // num_heads, max_seq_len, device=in_features.device, dtype=in_features.dtype)
+    transformer_block = model.TransformerBlock(
+        d_model, num_heads, d_ff, rope=rope, device=in_features.device, dtype=in_features.dtype
+    )
+    combined_weight = torch.cat(
+        [weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"]], dim=0
+    )
+    o_proj_weight = weights["attn.output_proj.weight"]
+    ln1_weight = weights["ln1.weight"]
+    ln2_weight = weights["ln2.weight"]
+    transformer_block.load_state_dict(
+        {
+            "att.W.W": combined_weight,
+            "att.Wo.W": o_proj_weight,
+            "rms_norm_att.g": ln1_weight,
+            "rms_norm_ff.g": ln2_weight,
+            "ff.W1.W": weights["ffn.w1.weight"],
+            "ff.W2.W": weights["ffn.w2.weight"],
+            "ff.W3.W": weights["ffn.w3.weight"],
+        }
+    )
+    return transformer_block(in_features)
 
 
 def run_transformer_lm(
@@ -369,7 +390,38 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    device = in_indices.device
+    transformer = model.Transformer(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        d_model=d_model,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        rope_theta=rope_theta,
+        device=device,
+    )
+    state_dict = {"token_embeddings.W": weights["token_embeddings.weight"]}
+    for i in range(num_layers):
+        combined_weight = torch.cat(
+            [
+                weights[f"layers.{i}.attn.q_proj.weight"],
+                weights[f"layers.{i}.attn.k_proj.weight"],
+                weights[f"layers.{i}.attn.v_proj.weight"],
+            ],
+            dim=0,
+        )
+        state_dict[f"layers.{i}.att.W.W"] = combined_weight
+        state_dict[f"layers.{i}.att.Wo.W"] = weights[f"layers.{i}.attn.output_proj.weight"]
+        state_dict[f"layers.{i}.rms_norm_att.g"] = weights[f"layers.{i}.ln1.weight"]
+        state_dict[f"layers.{i}.ff.W1.W"] = weights[f"layers.{i}.ffn.w1.weight"]
+        state_dict[f"layers.{i}.ff.W2.W"] = weights[f"layers.{i}.ffn.w2.weight"]
+        state_dict[f"layers.{i}.ff.W3.W"] = weights[f"layers.{i}.ffn.w3.weight"]
+        state_dict[f"layers.{i}.rms_norm_ff.g"] = weights[f"layers.{i}.ln2.weight"]
+    state_dict["norm.g"] = weights["ln_final.weight"]
+    state_dict["lm_head.W"] = weights["lm_head.weight"]
+    transformer.load_state_dict(state_dict)
+    return transformer(in_indices)
 
 
 def run_rmsnorm(
@@ -465,7 +517,7 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    return training.cross_entropy_loss(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
