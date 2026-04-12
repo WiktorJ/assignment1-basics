@@ -61,6 +61,21 @@ models = [
     },
 ]
 
+models2 = [
+    {
+        "name": "GPT-2 XL",
+        "config": {
+            "vocab_size": 50257,
+            "seq_len": 1024,
+            "num_layers": 48,
+            "d_model": 1600,
+            "num_heads": 25,
+            "d_ff": 6400,
+            "bs": 1,
+        },
+    },
+]
+
 
 def count_params(c: dict) -> dict:
     # counts parameters according to the formula:
@@ -79,6 +94,62 @@ def count_params(c: dict) -> dict:
         "lm_head": f"{p_lm_head:,}",
         "total": f"{p_total:,}",
         "total (fp32 GB)": f"{p_total_gb:.2f} GB",
+        "total_int": p_total,
+    }
+
+
+def count_peak_memory_adamw(c: dict) -> dict:
+    fp_precision = 4
+    # parameters
+    parameters = count_params(c)["total_int"]
+    # optimizer state
+    optimizer_state = 2 * parameters
+
+    # gradients
+    gradients = parameters
+
+    # activations
+    # - transfomer
+    # -- attention block
+    rms_norm = 2 * c["d_model"] * c["seq_len"] * c["bs"]
+    qvk = 3 * c["d_model"] * c["seq_len"] * c["bs"]
+    qk = c["num_heads"] * c["seq_len"] ** 2 * c["bs"]
+    qk_softmax = qk
+    val_sum = c["d_model"] * c["seq_len"] * c["bs"]
+    output_proj = c["d_model"] * c["seq_len"] * c["bs"]
+    attention_total = rms_norm + qvk + qk + qk_softmax + val_sum + output_proj
+    # -- ff silu
+    ff1 = c["d_ff"] * c["seq_len"] * c["bs"]
+    ff_silu = c["d_ff"] * c["seq_len"] * c["bs"]
+    ff2 = c["d_model"] * c["seq_len"] * c["bs"]
+    ff_total = ff1 + ff_silu + ff2
+
+    attention_total_block_total = c["num_layers"] * (attention_total + ff_total)
+    # - final rms norm
+    rms_norm = c["d_model"] * c["seq_len"] * c["bs"]
+    # - lm_head
+    lm_head = c["vocab_size"] * c["seq_len"] * c["bs"]
+    # - cross entropy
+    final_softmax = c["vocab_size"] * c["seq_len"] * c["bs"]
+    ce = c["seq_len"] * c["bs"]
+    total_ce = final_softmax + ce
+
+    activations = attention_total_block_total + rms_norm + lm_head + total_ce
+
+    # total
+    total_count = parameters + optimizer_state + gradients + activations
+    peak_memory_gb = total_count * fp_precision / 1e9
+
+    return {
+        "parameters": f"{parameters:,}",
+        "parameters GB": f"{parameters * fp_precision / 1e9:.2f} GB",
+        "optimizer state": f"{optimizer_state:,}",
+        "optimizer state GB": f"{optimizer_state * fp_precision / 1e9:.2f} GB",
+        "gradients": f"{gradients:,}",
+        "gradients GB": f"{gradients * fp_precision / 1e9:.2f} GB",
+        "activations": f"{activations:,}",
+        "activations GB": f"{activations * fp_precision / 1e9:.2f} GB",
+        "total GB": f"{peak_memory_gb:.2f} GB",
     }
 
 
@@ -109,6 +180,7 @@ def count_flops(c: dict) -> dict:
         "layers": f"{f_layers:,}",
         "total": f"{f_total:,}",
         "total (TFLOPs)": f"{f_total_tflops:.2f} TFLOPs",
+        "total + backwards (TFLOPs)": f"{f_total_tflops * 3:.2f} TFLOPs",
     }
 
 
@@ -123,11 +195,28 @@ def print_results(title: str, data: dict) -> None:
 
 
 if __name__ == "__main__":
-    for model in models:
-        name = model["name"]
-        c = model["config"]
-        print(f"\n\n{'#' * 44}")
-        print(f"  {name}")
-        print(f"{'#' * 44}")
-        print_results("Parameter Counts", count_params(c))
-        print_results("FLOPs Counts", count_flops(c))
+    # for model in models:
+    #     name = model["name"]
+    #     c = model["config"]
+    #     print(f"\n\n{'#' * 44}")
+    #     print(f"  {name}")
+    #     print(f"{'#' * 44}")
+    # print_results("Parameter Counts", count_params(c))
+    # print_results("FLOPs Counts", count_flops(c))
+    for model in models2:
+        for batch_size in (1024,):
+            c = model["config"]
+            c["bs"] = batch_size
+            print(f"\n\n{'#' * 44}")
+            print(f"  {model['name']} (bs={batch_size})")
+            print_results("Memory Counts", count_peak_memory_adamw(c))
+            print_results("FLOPs Counts", count_flops(c))
+
+    total_tflops = 10774 * 400_000
+    max_nvidia_a100_tflops = 19.5
+    mfu = 0.5
+    tflops = max_nvidia_a100_tflops * mfu
+    seconds = total_tflops / tflops
+    days = seconds / (60 * 60 * 24)
+    print(f"\n\n{'#' * 44}")
+    print(f"  {days:.2f} days")
