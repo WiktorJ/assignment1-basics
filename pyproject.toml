@@ -22,7 +22,9 @@ dependencies = [
     "sortedcontainers",
     "debugpy",
     "playwright",
-    "cecli-dev"
+    "cecli-dev",
+    "mlflow>=2.0.0",
+    "tyro>=0.9.0",
 ]
 
 [build-system]
