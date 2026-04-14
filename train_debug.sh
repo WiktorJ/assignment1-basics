@@ -1,5 +1,5 @@
 #!/bin/bash
-uv run python -m cs336_basics/training \
+uv run python cs336_basics/training.py \
   --train_input_path data/TinyStoriesV2-GPT4-train-encoded.txt \
   --eval_input_path data/TinyStoriesV2-GPT4-eval-encoded.txt \
   --output_path model_training \

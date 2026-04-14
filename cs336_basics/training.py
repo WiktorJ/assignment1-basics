@@ -6,10 +6,11 @@ from numpy.lib.stride_tricks import sliding_window_view
 import os
 import typing
 import time
+from dataclasses import field
 import mlflow
 import tyro
-import model as model_lib
-import optimizer as optimizer_lib
+from cs336_basics import model as model_lib
+from cs336_basics import optimizer as optimizer_lib
 
 
 @dataclass
@@ -23,15 +24,17 @@ class ModelConfig:
     rope_theta: float = 10000.0
 
 
+@dataclass
 class OptimizerConfig:
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-1
     eps: float = 1e-8
 
 
+@dataclass
 class LRConfig:
-    min_lr = 1e-5
-    max_lr = 1e-3
+    min_lr: float = 1e-5
+    max_lr: float = 1e-3
     warmup_iters: int = 200
     cosine_cycle_iters: int = 1000
 
@@ -53,9 +56,9 @@ class TrainingConfig:
 
     gradient_accumulation_steps: int = 1
 
-    model_config: ModelConfig = ModelConfig()
-    optimizer_config: OptimizerConfig = OptimizerConfig()
-    lr_config: LRConfig = LRConfig()
+    model_config: ModelConfig = field(default_factory=ModelConfig)
+    optimizer_config: OptimizerConfig = field(default_factory=OptimizerConfig)
+    lr_config: LRConfig = field(default_factory=LRConfig)
 
 
 @torch.compile
@@ -159,19 +162,21 @@ def train(config: TrainingConfig):
 
     mlflow.set_experiment("cs336_training")
     mlflow_run = mlflow.start_run(run_name=run_name)
-    mlflow.log_params({
-        **config.model_config.__dict__,
-        "batch_size": config.batch_size,
-        "max_steps": config.max_steps,
-        "gradient_accumulation_steps": config.gradient_accumulation_steps,
-        "max_l2_norm": config.max_l2_norm,
-        "max_lr": config.lr_config.max_lr,
-        "min_lr": config.lr_config.min_lr,
-        "warmup_iters": config.lr_config.warmup_iters,
-        "cosine_cycle_iters": config.lr_config.cosine_cycle_iters,
-        "weight_decay": config.optimizer_config.weight_decay,
-        "betas": str(config.optimizer_config.betas),
-    })
+    mlflow.log_params(
+        {
+            **config.model_config.__dict__,
+            "batch_size": config.batch_size,
+            "max_steps": config.max_steps,
+            "gradient_accumulation_steps": config.gradient_accumulation_steps,
+            "max_l2_norm": config.max_l2_norm,
+            "max_lr": config.lr_config.max_lr,
+            "min_lr": config.lr_config.min_lr,
+            "warmup_iters": config.lr_config.warmup_iters,
+            "cosine_cycle_iters": config.lr_config.cosine_cycle_iters,
+            "weight_decay": config.optimizer_config.weight_decay,
+            "betas": str(config.optimizer_config.betas),
+        }
+    )
 
     model = model_lib.Transformer(**config.model_config.__dict__, device=config.device, dtype=dtype)
     model.to(config.device)
