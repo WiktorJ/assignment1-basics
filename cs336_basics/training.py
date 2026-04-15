@@ -61,7 +61,6 @@ class TrainingConfig:
     lr_config: LRConfig = field(default_factory=LRConfig)
 
 
-@torch.compile
 def cross_entropy_loss(logits, targets, dim=-1):
     logits = logits - torch.max(logits, dim=dim, keepdim=True)[0]
     log_exp_sum = torch.sum(torch.exp(logits), dim=dim, keepdim=True)
@@ -70,7 +69,7 @@ def cross_entropy_loss(logits, targets, dim=-1):
 
 
 def calculate_perplexity(losses):
-    return np.exp(losses.mean())
+    return np.exp(np.mean(losses))
 
 
 def lr_cosine_schedule(it, max_lr, min_lr, warmup_iters, cosine_cycle_iters):
@@ -137,7 +136,7 @@ def eval(
     with torch.no_grad():
         for _ in range(eval_iters):
             logits = model(x)
-            losses.append(cross_entropy_loss(logits, y))
+            losses.append(cross_entropy_loss(logits, y).item())
     val_loss = np.mean(losses)
     perplexity = calculate_perplexity(losses)
     model.train()
@@ -187,11 +186,14 @@ def train(config: TrainingConfig):
     else:
         start_step = 0
 
-    if config.device != "mps":
+    global cross_entropy_loss
+    if config.device == "cuda":
         model = torch.compile(model)
+        cross_entropy_loss = torch.compile(cross_entropy_loss)
         torch.set_float32_matmul_precision("high")
-    elif config.device == "mps":
+    elif config.device in ("cpu", "mps"):
         model = torch.compile(model, backend="aot_eager")
+        cross_entropy_loss = torch.compile(cross_entropy_loss, backend="aot_eager")
 
     lr_schedule = lambda step: lr_cosine_schedule(
         step,

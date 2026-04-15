@@ -163,3 +163,5 @@ cython_debug/
 *.zip
 .cecli*
 data/*
+model_training/*
+mlflow*
