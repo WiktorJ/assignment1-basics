@@ -6,6 +6,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 import os
 import typing
 import time
+import json
 from dataclasses import field
 import mlflow
 import tyro
@@ -106,7 +107,8 @@ def save_checkpoint(
     iteration: int,
     out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
 ):
-    obj = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "iteration": iteration}
+    unwrapped = model._orig_mod if hasattr(model, "_orig_mod") else model
+    obj = {"model": unwrapped.state_dict(), "optimizer": optimizer.state_dict(), "iteration": iteration}
     torch.save(obj, out)
 
 
@@ -176,6 +178,15 @@ def train(config: TrainingConfig):
             "betas": str(config.optimizer_config.betas),
         }
     )
+
+    os.makedirs(output_path, exist_ok=True)
+    with open(os.path.join(output_path, "model_config.json"), "w") as f:
+        json.dump(config.model_config.__dict__, f, indent=2)
+
+    if config.resume_checkpoint_path:
+        resume_run_dir = os.path.dirname(os.path.dirname(config.resume_checkpoint_path))
+        with open(os.path.join(resume_run_dir, "model_config.json")) as f:
+            config.model_config = ModelConfig(**json.load(f))
 
     model = model_lib.Transformer(**config.model_config.__dict__, device=config.device, dtype=dtype)
     model.to(config.device)
